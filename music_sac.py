@@ -236,3 +236,21 @@ class EpisodeBuffer:
         o_curr = self.o[ep_idx, t    ]   # (B, obs_dim)
         o_next = self.o[ep_idx, t + 1]   # (B, obs_dim)
         return np.stack([o_curr, o_next], axis=1)   # (B, 2, obs_dim)
+
+
+def compute_mi_reward(mine: MINENet, o: np.ndarray, o_2: np.ndarray,
+                      mi_r_scale: float = 5000.0) -> np.ndarray:
+    """Compute clipped MINE intrinsic reward for a batch of transitions.
+    Args:
+        o, o_2: (B, obs_dim) consecutive observations
+    Returns:
+        r_i: (B, 1) float32, values in [0, 1]
+    Reference: baselines/her/her.py:_sample_her_transitions (mi_r_scale * mi_trans)
+               baselines/her/ddpg.py:_create_network (clip(mi_r_scale*m, 0, 1))
+    """
+    o_tau = np.stack([o, o_2], axis=1)                          # (B, 2, obs_dim)
+    t     = torch.as_tensor(o_tau, dtype=torch.float32)
+    with torch.no_grad():
+        neg_loss = mine(t).cpu().numpy()                         # (B, 1)
+    mi_est = -neg_loss                                           # MINE lower bound
+    return np.clip(mi_r_scale * mi_est, 0.0, 1.0).astype(np.float32)

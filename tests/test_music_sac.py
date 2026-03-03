@@ -226,3 +226,13 @@ def test_buffer_sample_mi_pairs():
         buf.store_episode(_make_episode(T=5))
     pairs = buf.sample_mi_pairs(32)
     assert pairs.shape == (32, 2, OBS_DIM)
+
+
+def test_compute_mi_reward_shape_and_range():
+    mine = MINENet()
+    o   = np.random.randn(32, OBS_DIM).astype(np.float32)
+    o_2 = np.random.randn(32, OBS_DIM).astype(np.float32)
+    r = compute_mi_reward(mine, o, o_2, mi_r_scale=5000)
+    assert r.shape == (32, 1)
+    assert np.all(r >= 0.0)
+    assert np.all(r <= 1.0)
