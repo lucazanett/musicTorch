@@ -9,6 +9,7 @@ from music_sac import *
 
 
 def test_normalizer_stats():
+    np.random.seed(42)
     norm = Normalizer(size=3)
     data = np.random.randn(2000, 3).astype(np.float32) * 2.0 + 5.0  # mean≈5, std≈2
     norm.update(data)
