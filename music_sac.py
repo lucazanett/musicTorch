@@ -248,9 +248,13 @@ def compute_mi_reward(mine: MINENet, o: np.ndarray, o_2: np.ndarray,
     Reference: baselines/her/her.py:_sample_her_transitions (mi_r_scale * mi_trans)
                baselines/her/ddpg.py:_create_network (clip(mi_r_scale*m, 0, 1))
     """
-    o_tau = np.stack([o, o_2], axis=1)                          # (B, 2, obs_dim)
-    t     = torch.as_tensor(o_tau, dtype=torch.float32)
+    o_tau     = np.stack([o, o_2], axis=1)                       # (B, 2, obs_dim)
+    obs_pairs = torch.as_tensor(o_tau, dtype=torch.float32)
+    was_training = mine.training
+    mine.eval()
     with torch.no_grad():
-        neg_loss = mine(t).cpu().numpy()                         # (B, 1)
+        neg_loss = mine(obs_pairs).cpu().numpy()                 # (B, 1)
+    if was_training:
+        mine.train()
     mi_est = -neg_loss                                           # MINE lower bound
     return np.clip(mi_r_scale * mi_est, 0.0, 1.0).astype(np.float32)
