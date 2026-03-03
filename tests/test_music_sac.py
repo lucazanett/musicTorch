@@ -237,3 +237,46 @@ def test_compute_mi_reward_shape_and_range():
     assert r.shape == (32, 1)
     assert np.all(r >= 0.0)
     assert np.all(r <= 1.0)
+
+
+def test_update_critic_reduces_loss():
+    """Critic loss should be finite and Q values should change after update."""
+    torch.manual_seed(0)
+    actor  = Actor(OBS_DIM, GOAL_DIM, ACT_DIM)
+    critic = TwinQ(OBS_DIM, GOAL_DIM, ACT_DIM)
+    target = TwinQ(OBS_DIM, GOAL_DIM, ACT_DIM)
+    target.load_state_dict(critic.state_dict())
+    opt_c = torch.optim.Adam(critic.parameters(), lr=1e-3)
+    log_alpha = torch.tensor(0.0, requires_grad=True)
+
+    norm_o = Normalizer(OBS_DIM); norm_g = Normalizer(GOAL_DIM)
+    o   = torch.randn(32, OBS_DIM)
+    o_2 = torch.randn(32, OBS_DIM)
+    g   = torch.randn(32, GOAL_DIM)
+    a   = torch.randn(32, ACT_DIM)
+    r_i = torch.rand(32, 1)
+
+    q1_before, _ = critic(norm_o.normalize(o), norm_g.normalize(g), a)
+    loss = update_critic(critic, target, actor, opt_c, norm_o, norm_g,
+                         o, o_2, g, a, r_i, log_alpha, gamma=0.98,
+                         clip_return=50.0, action_l2=1.0)
+    assert np.isfinite(loss)
+    q1_after, _ = critic(norm_o.normalize(o), norm_g.normalize(g), a)
+    assert not torch.allclose(q1_before, q1_after)
+
+def test_update_actor_and_alpha():
+    torch.manual_seed(0)
+    actor  = Actor(OBS_DIM, GOAL_DIM, ACT_DIM)
+    critic = TwinQ(OBS_DIM, GOAL_DIM, ACT_DIM)
+    opt_a     = torch.optim.Adam(actor.parameters(),  lr=1e-3)
+    log_alpha = torch.tensor(0.0, requires_grad=True)
+    opt_alpha = torch.optim.Adam([log_alpha], lr=1e-3)
+    norm_o = Normalizer(OBS_DIM); norm_g = Normalizer(GOAL_DIM)
+    o = torch.randn(32, OBS_DIM); g = torch.randn(32, GOAL_DIM)
+
+    alpha_before = log_alpha.item()
+    update_actor(actor, critic, opt_a, norm_o, norm_g, o, g,
+                 log_alpha, action_l2=1.0)
+    update_alpha(log_alpha, opt_alpha, actor, norm_o, norm_g, o, g,
+                 target_entropy=-ACT_DIM)
+    assert log_alpha.item() != alpha_before

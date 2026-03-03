@@ -258,3 +258,73 @@ def compute_mi_reward(mine: MINENet, o: np.ndarray, o_2: np.ndarray,
         mine.train()
     mi_est = -neg_loss                                           # MINE lower bound
     return np.clip(mi_r_scale * mi_est, 0.0, 1.0).astype(np.float32)
+
+
+def update_critic(
+    critic: TwinQ, target: TwinQ, actor: Actor,
+    opt: torch.optim.Optimizer,
+    norm_o: Normalizer, norm_g: Normalizer,
+    o: torch.Tensor, o_2: torch.Tensor, g: torch.Tensor,
+    a: torch.Tensor, r_i: torch.Tensor, log_alpha: torch.Tensor,
+    gamma: float = 0.98, clip_return: float = 50.0,
+    action_l2: float = 1.0,
+) -> float:
+    """Bellman update for TwinQ critic.
+    target_Q = r_i + gamma * (min_Q_target(s',a') - alpha * log_pi(a'))
+    Reference: baselines/her/ddpg.py:_create_network (target_tf, Q_loss_tf)
+    """
+    alpha = log_alpha.detach().exp()
+    with torch.no_grad():
+        o2_norm = norm_o.normalize(o_2)
+        g_norm  = norm_g.normalize(g)
+        a_next, log_prob_next = actor.sample(o2_norm, g_norm)
+        q1_t, q2_t = target(o2_norm, g_norm, a_next)
+        q_target = r_i + gamma * (torch.min(q1_t, q2_t) - alpha * log_prob_next)
+        q_target = torch.clamp(q_target, -clip_return, clip_return)
+
+    o_norm = norm_o.normalize(o)
+    g_norm = norm_g.normalize(g)
+    q1, q2 = critic(o_norm, g_norm, a)
+    loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
+    opt.zero_grad(); loss.backward(); opt.step()
+    return loss.item()
+
+
+def update_actor(
+    actor: Actor, critic: TwinQ,
+    opt: torch.optim.Optimizer,
+    norm_o: Normalizer, norm_g: Normalizer,
+    o: torch.Tensor, g: torch.Tensor,
+    log_alpha: torch.Tensor, action_l2: float = 1.0,
+) -> float:
+    """SAC policy gradient update.
+    L_pi = alpha * log_pi(a|s) - min_Q(s, a) + action_l2 * ||a/max_u||^2
+    Reference: baselines/her/ddpg.py:_create_network (pi_loss_tf)
+    """
+    alpha  = log_alpha.detach().exp()
+    o_norm = norm_o.normalize(o)
+    g_norm = norm_g.normalize(g)
+    a, log_prob = actor.sample(o_norm, g_norm)
+    q1, q2 = critic(o_norm, g_norm, a)
+    l2_reg = action_l2 * (a / actor.max_u).pow(2).mean()
+    loss = (alpha * log_prob - torch.min(q1, q2) + l2_reg).mean()
+    opt.zero_grad(); loss.backward(); opt.step()
+    return loss.item()
+
+
+def update_alpha(
+    log_alpha: torch.Tensor, opt: torch.optim.Optimizer,
+    actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
+    o: torch.Tensor, g: torch.Tensor,
+    target_entropy: float,
+) -> float:
+    """Entropy temperature update (learnable alpha).
+    L_alpha = -alpha * (log_pi(a|s) + target_entropy)
+    """
+    o_norm = norm_o.normalize(o)
+    g_norm = norm_g.normalize(g)
+    with torch.no_grad():
+        _, log_prob = actor.sample(o_norm, g_norm)
+    loss = -(log_alpha * (log_prob + target_entropy)).mean()
+    opt.zero_grad(); loss.backward(); opt.step()
+    return loss.item()
