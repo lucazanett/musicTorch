@@ -96,3 +96,37 @@ def test_mine_higher_mi_for_correlated_vs_independent():
         mi_indep = -mine(indep).mean().item()
 
     assert mi_corr > mi_indep, f"Expected MI(corr)={mi_corr:.3f} > MI(indep)={mi_indep:.3f}"
+
+
+def test_actor_sample_shapes():
+    actor = Actor(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    o = torch.randn(8, OBS_DIM)
+    g = torch.randn(8, GOAL_DIM)
+    action, log_prob = actor.sample(o, g)
+    assert action.shape   == (8, ACT_DIM)
+    assert log_prob.shape == (8, 1)
+
+def test_actor_action_bounded():
+    actor = Actor(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM, max_u=MAX_U)
+    o = torch.randn(64, OBS_DIM)
+    g = torch.randn(64, GOAL_DIM)
+    action, _ = actor.sample(o, g)
+    assert torch.all(action >= -MAX_U - 1e-6)
+    assert torch.all(action <=  MAX_U + 1e-6)
+
+def test_actor_get_action_deterministic():
+    torch.manual_seed(42)
+    actor = Actor(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    actor.eval()
+    o = torch.randn(1, OBS_DIM)
+    g = torch.randn(1, GOAL_DIM)
+    a1 = actor.get_action(o, g)
+    a2 = actor.get_action(o, g)
+    np.testing.assert_array_equal(a1, a2)
+
+def test_actor_log_prob_finite():
+    actor = Actor(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    o = torch.randn(32, OBS_DIM)
+    g = torch.randn(32, GOAL_DIM)
+    _, log_prob = actor.sample(o, g)
+    assert torch.all(torch.isfinite(log_prob))

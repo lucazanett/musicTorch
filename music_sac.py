@@ -95,3 +95,50 @@ class MINENet(nn.Module):
         mean_exp = torch.mean(torch.exp(T_x_y), dim=1)      # (B, 1)
         mine_est = torch.mean(T_xy, dim=1) - torch.log(mean_exp + 1e-8)
         return -mine_est                                      # neg_loss: minimize this
+
+
+class Actor(nn.Module):
+    """SAC Gaussian policy with tanh squashing.
+    Input:  normalized obs (B, obs_dim) + normalized goal (B, goal_dim)
+    Output: action in [-max_u, max_u]^act_dim, log_prob (B,1)
+    Reference: baselines/her/actor_critic.py:mlp_gaussian_policy + apply_squashing_func
+    """
+
+    def __init__(self, obs_dim: int, goal_dim: int, act_dim: int,
+                 hidden: int = 256, max_u: float = MAX_U):
+        super().__init__()
+        self.max_u = max_u
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + goal_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden),              nn.ReLU(),
+        )
+        self.mu_layer      = nn.Linear(hidden, act_dim)
+        self.log_std_layer = nn.Linear(hidden, act_dim)
+
+    def _mu_log_std(self, o_norm: torch.Tensor, g_norm: torch.Tensor):
+        h = self.net(torch.cat([o_norm, g_norm], dim=-1))
+        mu = self.mu_layer(h)
+        log_std = torch.tanh(self.log_std_layer(h))
+        log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1.0)
+        return mu, log_std
+
+    def sample(self, o_norm: torch.Tensor, g_norm: torch.Tensor):
+        mu, log_std = self._mu_log_std(o_norm, g_norm)
+        std = log_std.exp()
+        x_t = mu + torch.randn_like(mu) * std           # reparameterization
+        y_t = torch.tanh(x_t)
+        action = y_t * self.max_u
+        # log prob with squashing correction
+        log_prob = (
+            -0.5 * ((x_t - mu) / (std + 1e-8)).pow(2)
+            - log_std
+            - 0.5 * np.log(2 * np.pi)
+        ).sum(dim=-1, keepdim=True)
+        log_prob -= torch.log(1.0 - y_t.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
+        return action, log_prob
+
+    def get_action(self, o_norm: torch.Tensor, g_norm: torch.Tensor) -> np.ndarray:
+        """Deterministic action for rollouts/eval (no noise)."""
+        with torch.no_grad():
+            mu, _ = self._mu_log_std(o_norm, g_norm)
+        return (torch.tanh(mu) * self.max_u).cpu().numpy()
