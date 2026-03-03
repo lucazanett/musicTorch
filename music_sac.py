@@ -210,14 +210,15 @@ class EpisodeBuffer:
         ep_idx = np.random.randint(0, self.size, batch_size)
         t      = np.random.randint(0, self.T,    batch_size)
 
-        g = self.g[ep_idx, t].copy()
+        g = self.g[ep_idx, t].copy()  # must copy: mutated in-place by HER below
 
-        # HER: replace some goals with future achieved goals
-        her_mask    = np.random.uniform(size=batch_size) < self.future_p
-        her_idxs    = np.where(her_mask)[0]
-        future_off  = np.random.randint(1, self.T + 1, size=batch_size)
-        future_t    = np.minimum(t + future_off, self.T)
-        g[her_idxs] = self.ag[ep_idx[her_idxs], future_t[her_idxs]]
+        # HER: replace some goals with future achieved goals (future_p fraction)
+        her_mask   = np.random.uniform(size=batch_size) < self.future_p
+        her_idxs   = np.where(her_mask)[0]
+        # Compute future_t only for HER transitions to make intent clear
+        future_off = np.random.randint(1, self.T + 1, size=len(her_idxs))
+        future_t   = np.minimum(t[her_idxs] + future_off, self.T)
+        g[her_idxs] = self.ag[ep_idx[her_idxs], future_t]
 
         o    = self.o [ep_idx, t    ]
         o_2  = self.o [ep_idx, t + 1]
