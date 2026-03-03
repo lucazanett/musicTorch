@@ -41,3 +41,58 @@ def test_normalizer_clip():
     x = np.array([[1e9]], dtype=np.float32)
     out = norm.normalize(x)
     assert out[0, 0] <= 5.0
+
+
+def test_mine_output_shape():
+    mine = MINENet(hidden=64)
+    o_tau = torch.randn(16, 2, OBS_DIM)
+    neg_loss = mine(o_tau)
+    assert neg_loss.shape == (16, 1), f"expected (16,1), got {neg_loss.shape}"
+
+def test_mine_neg_loss_on_correlated_data():
+    """After training, MINE estimate (= -neg_loss) should be > 0 for correlated data."""
+    torch.manual_seed(0)
+    mine = MINENet(hidden=64)
+    opt = torch.optim.Adam(mine.parameters(), lr=1e-3)
+
+    for _ in range(300):
+        base = torch.randn(64, 2, 3)
+        o_tau = torch.zeros(64, 2, OBS_DIM)
+        o_tau[:, :, GRIP_POS_SLICE] = base                          # x = base
+        o_tau[:, :, OBJ_POS_SLICE]  = base + torch.randn(64, 2, 3) * 0.1  # y ≈ x
+        loss = mine(o_tau).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+
+    with torch.no_grad():
+        neg_loss_val = mine(o_tau).mean().item()
+    assert neg_loss_val < 0, f"Expected neg_loss < 0 (MI > 0), got {neg_loss_val}"
+
+def test_mine_higher_mi_for_correlated_vs_independent():
+    """MINE estimate should be higher for correlated pairs than independent pairs."""
+    torch.manual_seed(1)
+    mine = MINENet(hidden=64)
+    opt = torch.optim.Adam(mine.parameters(), lr=1e-3)
+
+    for _ in range(300):
+        base = torch.randn(64, 2, 3)
+        o_tau = torch.zeros(64, 2, OBS_DIM)
+        o_tau[:, :, GRIP_POS_SLICE] = base
+        o_tau[:, :, OBJ_POS_SLICE]  = base + torch.randn(64, 2, 3) * 0.1
+        mine(o_tau).mean().backward()
+        opt.step(); opt.zero_grad()
+
+    with torch.no_grad():
+        # Correlated
+        base = torch.randn(64, 2, 3)
+        corr = torch.zeros(64, 2, OBS_DIM)
+        corr[:, :, GRIP_POS_SLICE] = base
+        corr[:, :, OBJ_POS_SLICE]  = base + torch.randn(64, 2, 3) * 0.1
+        mi_corr = -mine(corr).mean().item()
+
+        # Independent
+        indep = torch.zeros(64, 2, OBS_DIM)
+        indep[:, :, GRIP_POS_SLICE] = torch.randn(64, 2, 3)
+        indep[:, :, OBJ_POS_SLICE]  = torch.randn(64, 2, 3)
+        mi_indep = -mine(indep).mean().item()
+
+    assert mi_corr > mi_indep, f"Expected MI(corr)={mi_corr:.3f} > MI(indep)={mi_indep:.3f}"
