@@ -161,3 +161,68 @@ def test_soft_update():
     p1 = list(target.parameters())[0].data.clone()
     expected = 0.05 * p_src + 0.95 * p0
     torch.testing.assert_close(p1, expected)
+
+
+# ── EpisodeBuffer helpers ───────────────────────────────────────────────────
+
+def _make_episode(T=5, obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM):
+    return {
+        'o':  np.random.randn(T + 1, obs_dim).astype(np.float32),
+        'ag': np.random.randn(T + 1, goal_dim).astype(np.float32),
+        'g':  np.random.randn(T,     goal_dim).astype(np.float32),
+        'u':  np.random.randn(T,     act_dim).astype(np.float32),
+    }
+
+def _dummy_reward(ag, g):
+    return (np.linalg.norm(ag - g, axis=-1) < 0.05).astype(np.float32) - 1.0
+
+
+# ── EpisodeBuffer tests ─────────────────────────────────────────────────────
+
+def test_buffer_store_and_size():
+    buf = EpisodeBuffer(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM,
+                        T=5, buffer_size=50)
+    assert buf.size == 0
+    buf.store_episode(_make_episode(T=5))
+    assert buf.size == 1
+    for _ in range(20):
+        buf.store_episode(_make_episode(T=5))
+    assert buf.size == min(21, buf.max_episodes)
+
+def test_buffer_sample_shapes():
+    buf = EpisodeBuffer(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM,
+                        T=5, buffer_size=50)
+    for _ in range(5):
+        buf.store_episode(_make_episode(T=5))
+    batch = buf.sample(32, _dummy_reward)
+    assert batch['o'].shape   == (32, OBS_DIM)
+    assert batch['o_2'].shape == (32, OBS_DIM)
+    assert batch['g'].shape   == (32, GOAL_DIM)
+    assert batch['u'].shape   == (32, ACT_DIM)
+    assert batch['r'].shape   == (32,)
+
+def test_buffer_her_relabeling():
+    """High replay_k → most goals replaced → most rewards should be 0 (success)."""
+    T = 10
+    buf = EpisodeBuffer(obs_dim=3, goal_dim=3, act_dim=1, T=T,
+                        buffer_size=200, replay_k=100)
+    # Achieved goal is always [1,0,0]; desired goal is random
+    ep = {
+        'o':  np.zeros((T + 1, 3), np.float32),
+        'ag': np.tile([1.0, 0.0, 0.0], (T + 1, 1)).astype(np.float32),
+        'g':  np.random.randn(T, 3).astype(np.float32),
+        'u':  np.zeros((T, 1), np.float32),
+    }
+    for _ in range(20):
+        buf.store_episode(ep)
+    batch = buf.sample(200, _dummy_reward)
+    # With replay_k=100 nearly all goals replaced → ag≈g≈[1,0,0] → reward≈0
+    assert batch['r'].mean() > -0.3, f"Expected many successes, got mean_r={batch['r'].mean():.2f}"
+
+def test_buffer_sample_mi_pairs():
+    buf = EpisodeBuffer(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM,
+                        T=5, buffer_size=50)
+    for _ in range(5):
+        buf.store_episode(_make_episode(T=5))
+    pairs = buf.sample_mi_pairs(32)
+    assert pairs.shape == (32, 2, OBS_DIM)

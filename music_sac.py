@@ -177,3 +177,61 @@ class Actor(nn.Module):
         with torch.no_grad():
             mu, _ = self._mu_log_std(o_norm, g_norm)
         return (torch.tanh(mu) * self.max_u).cpu().numpy()
+
+
+class EpisodeBuffer:
+    """Episode-based replay buffer with HER 'future' goal relabeling.
+    Stores complete episodes; samples individual transitions.
+    Reference: baselines/her/replay_buffer.py + her.py:make_sample_her_transitions
+    """
+
+    def __init__(self, obs_dim: int, goal_dim: int, act_dim: int,
+                 T: int, buffer_size: int = 1_000_000, replay_k: int = 4):
+        self.T           = T
+        self.future_p    = 1.0 - 1.0 / (1 + replay_k)
+        self.max_episodes = buffer_size // T
+        self.o   = np.zeros((self.max_episodes, T + 1, obs_dim),  np.float32)
+        self.ag  = np.zeros((self.max_episodes, T + 1, goal_dim), np.float32)
+        self.g   = np.zeros((self.max_episodes, T,     goal_dim), np.float32)
+        self.u   = np.zeros((self.max_episodes, T,     act_dim),  np.float32)
+        self._ptr  = 0
+        self.size  = 0
+
+    def store_episode(self, ep: dict) -> None:
+        idx = self._ptr % self.max_episodes
+        self.o[idx]  = ep['o']    # (T+1, obs_dim)
+        self.ag[idx] = ep['ag']
+        self.g[idx]  = ep['g']
+        self.u[idx]  = ep['u']
+        self._ptr += 1
+        self.size = min(self.size + 1, self.max_episodes)
+
+    def sample(self, batch_size: int, reward_fn) -> dict:
+        ep_idx = np.random.randint(0, self.size, batch_size)
+        t      = np.random.randint(0, self.T,    batch_size)
+
+        g = self.g[ep_idx, t].copy()
+
+        # HER: replace some goals with future achieved goals
+        her_mask    = np.random.uniform(size=batch_size) < self.future_p
+        her_idxs    = np.where(her_mask)[0]
+        future_off  = np.random.randint(1, self.T + 1, size=batch_size)
+        future_t    = np.minimum(t + future_off, self.T)
+        g[her_idxs] = self.ag[ep_idx[her_idxs], future_t[her_idxs]]
+
+        o    = self.o [ep_idx, t    ]
+        o_2  = self.o [ep_idx, t + 1]
+        ag   = self.ag[ep_idx, t    ]
+        ag_2 = self.ag[ep_idx, t + 1]
+        u    = self.u [ep_idx, t    ]
+        r    = reward_fn(ag_2, g)
+
+        return dict(o=o, o_2=o_2, ag=ag, ag_2=ag_2, g=g, u=u, r=r)
+
+    def sample_mi_pairs(self, batch_size: int) -> np.ndarray:
+        """Return (batch_size, 2, obs_dim) consecutive observation pairs for MINE."""
+        ep_idx = np.random.randint(0, self.size, batch_size)
+        t      = np.random.randint(0, self.T,    batch_size)
+        o_curr = self.o[ep_idx, t    ]   # (B, obs_dim)
+        o_next = self.o[ep_idx, t + 1]   # (B, obs_dim)
+        return np.stack([o_curr, o_next], axis=1)   # (B, 2, obs_dim)
