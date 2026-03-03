@@ -130,3 +130,34 @@ def test_actor_log_prob_finite():
     g = torch.randn(32, GOAL_DIM)
     _, log_prob = actor.sample(o, g)
     assert torch.all(torch.isfinite(log_prob))
+
+
+def test_twinq_output_shapes():
+    critic = TwinQ(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    o = torch.randn(8, OBS_DIM)
+    g = torch.randn(8, GOAL_DIM)
+    a = torch.randn(8, ACT_DIM)
+    q1, q2 = critic(o, g, a)
+    assert q1.shape == (8, 1)
+    assert q2.shape == (8, 1)
+
+def test_twinq_q1_q2_differ():
+    """The two Q heads should give different outputs (independent weights)."""
+    torch.manual_seed(0)
+    critic = TwinQ(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    o = torch.randn(4, OBS_DIM)
+    g = torch.randn(4, GOAL_DIM)
+    a = torch.randn(4, ACT_DIM)
+    q1, q2 = critic(o, g, a)
+    assert not torch.allclose(q1, q2)
+
+def test_soft_update():
+    critic = TwinQ(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    target = TwinQ(obs_dim=OBS_DIM, goal_dim=GOAL_DIM, act_dim=ACT_DIM)
+    # Record initial target param
+    p0 = list(target.parameters())[0].data.clone()
+    p_src = list(critic.parameters())[0].data.clone()
+    soft_update(target, critic, tau=0.05)
+    p1 = list(target.parameters())[0].data.clone()
+    expected = 0.05 * p_src + 0.95 * p0
+    torch.testing.assert_close(p1, expected)

@@ -97,6 +97,41 @@ class MINENet(nn.Module):
         return -mine_est                                      # neg_loss: minimize this
 
 
+def _mlp(in_dim: int, hidden: int, out_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden), nn.ReLU(),
+        nn.Linear(hidden, hidden), nn.ReLU(),
+        nn.Linear(hidden, out_dim),
+    )
+
+
+class TwinQ(nn.Module):
+    """Twin Q-networks for SAC critic.
+    Input:  normalized obs + normalized goal + action/max_u
+    Output: Q1, Q2 each of shape (B, 1)
+    Reference: baselines/her/actor_critic.py:ActorCritic (Q scope, twin via reuse=False)
+    """
+
+    def __init__(self, obs_dim: int, goal_dim: int, act_dim: int,
+                 hidden: int = 256, max_u: float = MAX_U):
+        super().__init__()
+        self.max_u = max_u
+        in_dim = obs_dim + goal_dim + act_dim
+        self.q1 = _mlp(in_dim, hidden, 1)
+        self.q2 = _mlp(in_dim, hidden, 1)
+
+    def forward(self, o_norm: torch.Tensor, g_norm: torch.Tensor,
+                a: torch.Tensor):
+        x = torch.cat([o_norm, g_norm, a / self.max_u], dim=-1)
+        return self.q1(x), self.q2(x)
+
+
+def soft_update(target: nn.Module, source: nn.Module, tau: float = 0.05) -> None:
+    """Polyak averaging: target <- tau*source + (1-tau)*target."""
+    for tp, sp in zip(target.parameters(), source.parameters()):
+        tp.data.copy_(tau * sp.data + (1.0 - tau) * tp.data)
+
+
 class Actor(nn.Module):
     """SAC Gaussian policy with tanh squashing.
     Input:  normalized obs (B, obs_dim) + normalized goal (B, goal_dim)
