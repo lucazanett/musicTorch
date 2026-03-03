@@ -77,9 +77,10 @@ class MINENet(nn.Module):
         x = o_tau[:, :, GRIP_POS_SLICE]   # (B, 2, 3)
         y = o_tau[:, :, OBJ_POS_SLICE]    # (B, 2, 3)
 
-        # Shuffle y along the batch axis to create marginal samples.
-        # Transpose to (T, B, dim) to match TF tf.random_shuffle on the leading dim,
-        # then shuffle the B axis (dim=1) to break joint distribution.
+        # Shuffle y along the batch axis to create marginal (x, ỹ) samples.
+        # Note: the TF1 reference shuffles the T axis, but with T=2 that is a
+        # near-useless coin flip. We shuffle the B axis instead (per design doc),
+        # which always produces genuine independent marginal samples.
         y_t    = y.permute(1, 0, 2)                          # (2, B, 3)
         y_shuf = y_t[:, torch.randperm(y_t.shape[1]), :]     # shuffle B dim
         y_shuffle = y_shuf.permute(1, 0, 2)                  # (B, 2, 3)
