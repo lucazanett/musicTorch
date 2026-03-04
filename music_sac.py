@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gymnasium as gym
+import gymnasium_robotics  # noqa: F401 — registers Fetch envs
 import time
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -410,7 +411,7 @@ def evaluate(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
 
 
 def train(
-    env_name: str = 'FetchPickAndPlace-v3',
+    env_name: str = 'FetchPickAndPlace-v4',
     n_epochs: int = 200,
     n_cycles: int = 50,
     n_batches: int = 40,
@@ -515,7 +516,7 @@ def train(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env',    default='FetchPickAndPlace-v3')
+    parser.add_argument('--env',    default='FetchPickAndPlace-v4')
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--seed',   type=int, default=0)
     args = parser.parse_args()
