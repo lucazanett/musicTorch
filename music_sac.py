@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import gymnasium as gym
 import gymnasium_robotics  # noqa: F401 — registers Fetch envs
 import time
+import wandb
 
 # ── Constants ──────────────────────────────────────────────────────────
 LOG_STD_MIN = -5
@@ -431,8 +432,22 @@ def train(
     noise_eps: float = 0.2,
     random_eps: float = 0.3,
     seed: int = 0,
+    wandb_project: str = None,
 ):
     np.random.seed(seed); torch.manual_seed(seed)
+
+    if wandb_project:
+        wandb.init(
+            project=wandb_project,
+            config=dict(
+                env_name=env_name, n_epochs=n_epochs, n_cycles=n_cycles,
+                n_batches=n_batches, rollout_batch=rollout_batch, T=T,
+                batch_size=batch_size, buffer_size=buffer_size, replay_k=replay_k,
+                hidden=hidden, gamma=gamma, polyak=polyak, lr=lr,
+                mi_r_scale=mi_r_scale, action_l2=action_l2, clip_return=clip_return,
+                noise_eps=noise_eps, random_eps=random_eps, seed=seed,
+            ),
+        )
 
     env      = gym.make(env_name)
     eval_env = gym.make(env_name)
@@ -458,6 +473,7 @@ def train(
 
     buffer = EpisodeBuffer(OBS_DIM, GOAL_DIM, ACT_DIM, T, buffer_size, replay_k)
 
+    global_step = 0
     for epoch in range(n_epochs):
         t_start = time.time()
 
@@ -477,13 +493,16 @@ def train(
 
             # 2. Train MINE
             mine.train()
+            mine_losses = []
             for _ in range(n_batches):
                 o_tau_np = buffer.sample_mi_pairs(batch_size)
                 o_tau    = torch.as_tensor(o_tau_np, dtype=torch.float32)
                 loss_mine = mine(o_tau).mean()
                 opt_mine.zero_grad(); loss_mine.backward(); opt_mine.step()
+                mine_losses.append(loss_mine.item())
 
             # 3. Train SAC
+            critic_losses, actor_losses, alpha_losses = [], [], []
             for _ in range(n_batches):
                 batch = buffer.sample(batch_size, compute_reward_np)
                 r_i   = compute_mi_reward(mine, batch['o'], batch['o_2'],
@@ -494,14 +513,26 @@ def train(
                 g_t  = t(batch['g']);  a_t  = t(batch['u'])
                 ri_t = t(r_i)
 
-                update_critic(critic, target, actor, opt_critic,
-                              norm_o, norm_g, o_t, o2_t, g_t, a_t,
-                              ri_t, log_alpha, gamma, clip_return)
-                update_actor( actor, critic, opt_actor,
-                              norm_o, norm_g, o_t, g_t, log_alpha, action_l2)
-                update_alpha( log_alpha, opt_alpha, actor,
-                              norm_o, norm_g, o_t, g_t, target_entropy)
+                critic_losses.append(update_critic(
+                    critic, target, actor, opt_critic,
+                    norm_o, norm_g, o_t, o2_t, g_t, a_t,
+                    ri_t, log_alpha, gamma, clip_return))
+                actor_losses.append(update_actor(
+                    actor, critic, opt_actor,
+                    norm_o, norm_g, o_t, g_t, log_alpha, action_l2))
+                alpha_losses.append(update_alpha(
+                    log_alpha, opt_alpha, actor,
+                    norm_o, norm_g, o_t, g_t, target_entropy))
                 soft_update(target, critic, tau=1.0 - polyak)
+
+            global_step += 1
+            if wandb_project:
+                wandb.log({
+                    'train/mine_loss':   np.mean(mine_losses),
+                    'train/critic_loss': np.mean(critic_losses),
+                    'train/actor_loss':  np.mean(actor_losses),
+                    'train/alpha_loss':  np.mean(alpha_losses),
+                }, step=global_step)
 
         # 4. Evaluate
         success_rate = evaluate(eval_env, actor, norm_o, norm_g, T, n_episodes=10)
@@ -510,15 +541,26 @@ def train(
               f"success={success_rate:.3f}  "
               f"alpha={log_alpha.exp().item():.4f}  "
               f"t={elapsed:.1f}s")
+        if wandb_project:
+            wandb.log({
+                'eval/success_rate': success_rate,
+                'train/alpha':       log_alpha.exp().item(),
+                'train/elapsed_s':   elapsed,
+            }, step=global_step)
 
     env.close(); eval_env.close()
+    if wandb_project:
+        wandb.finish()
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env',    default='FetchPickAndPlace-v4')
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--seed',   type=int, default=0)
+    parser.add_argument('--env',          default='FetchPickAndPlace-v4')
+    parser.add_argument('--epochs',       type=int, default=200)
+    parser.add_argument('--seed',         type=int, default=0)
+    parser.add_argument('--wandb-project', default=None,
+                        help='W&B project name (omit to disable logging)')
     args = parser.parse_args()
-    train(env_name=args.env, n_epochs=args.epochs, seed=args.seed)
+    train(env_name=args.env, n_epochs=args.epochs, seed=args.seed,
+          wandb_project=args.wandb_project)
