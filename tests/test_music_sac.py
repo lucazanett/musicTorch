@@ -259,7 +259,7 @@ def test_update_critic_reduces_loss():
     q1_before, _ = critic(norm_o.normalize(o), norm_g.normalize(g), a)
     loss = update_critic(critic, target, actor, opt_c, norm_o, norm_g,
                          o, o_2, g, a, r_i, log_alpha, gamma=0.98,
-                         clip_return=50.0, action_l2=1.0)
+                         clip_return=50.0)
     assert np.isfinite(loss)
     q1_after, _ = critic(norm_o.normalize(o), norm_g.normalize(g), a)
     assert not torch.allclose(q1_before, q1_after)

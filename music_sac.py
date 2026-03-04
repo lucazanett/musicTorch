@@ -267,23 +267,21 @@ def update_critic(
     o: torch.Tensor, o_2: torch.Tensor, g: torch.Tensor,
     a: torch.Tensor, r_i: torch.Tensor, log_alpha: torch.Tensor,
     gamma: float = 0.98, clip_return: float = 50.0,
-    action_l2: float = 1.0,
 ) -> float:
     """Bellman update for TwinQ critic.
     target_Q = r_i + gamma * (min_Q_target(s',a') - alpha * log_pi(a'))
     Reference: baselines/her/ddpg.py:_create_network (target_tf, Q_loss_tf)
     """
-    alpha = log_alpha.detach().exp()
+    alpha  = log_alpha.detach().exp()
+    o_norm = norm_o.normalize(o)
+    g_norm = norm_g.normalize(g)
     with torch.no_grad():
         o2_norm = norm_o.normalize(o_2)
-        g_norm  = norm_g.normalize(g)
         a_next, log_prob_next = actor.sample(o2_norm, g_norm)
         q1_t, q2_t = target(o2_norm, g_norm, a_next)
         q_target = r_i + gamma * (torch.min(q1_t, q2_t) - alpha * log_prob_next)
         q_target = torch.clamp(q_target, -clip_return, clip_return)
 
-    o_norm = norm_o.normalize(o)
-    g_norm = norm_g.normalize(g)
     q1, q2 = critic(o_norm, g_norm, a)
     loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
     opt.zero_grad(); loss.backward(); opt.step()
