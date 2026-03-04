@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gymnasium as gym
+from gymnasium.vector import SyncVectorEnv
 import gymnasium_robotics  # noqa: F401 — registers Fetch envs
 import time
 import wandb
@@ -388,6 +389,73 @@ def collect_episode(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
     }
 
 
+def collect_episodes_vec(
+    vec_env: SyncVectorEnv,
+    actor: Actor,
+    norm_o: Normalizer,
+    norm_g: Normalizer,
+    T: int,
+    n_envs: int,
+    noise_eps: float = 0.2,
+    random_eps: float = 0.3,
+) -> list:
+    """Collect exactly T steps from n_envs parallel envs; return n_envs episode dicts.
+
+    Termination/truncation signals are ignored — every env runs exactly T steps
+    (hard-reset-at-top, matching original MUSIC/HER baselines).
+
+    Returns:
+        List of n_envs dicts, each with:
+            'o':  (T+1, OBS_DIM)   float32
+            'ag': (T+1, GOAL_DIM)  float32
+            'g':  (T,   GOAL_DIM)  float32
+            'u':  (T,   ACT_DIM)   float32
+    """
+    obs_dict, _ = vec_env.reset()
+    o  = obs_dict['observation']    # (n_envs, OBS_DIM)
+    ag = obs_dict['achieved_goal']  # (n_envs, GOAL_DIM)
+    g  = obs_dict['desired_goal']   # (n_envs, GOAL_DIM) — fixed per episode
+    # g is captured once at reset and NOT updated during the loop.
+    # SyncVectorEnv auto-resets a finished sub-env and would overwrite its
+    # desired_goal on the next step; holding g fixed ensures all T transitions
+    # in each episode share a consistent goal for HER relabeling.
+
+    obs_buf = np.zeros((n_envs, T + 1, OBS_DIM),  dtype=np.float32)
+    ag_buf  = np.zeros((n_envs, T + 1, GOAL_DIM), dtype=np.float32)
+    g_buf   = np.zeros((n_envs, T,     GOAL_DIM), dtype=np.float32)
+    u_buf   = np.zeros((n_envs, T,     ACT_DIM),  dtype=np.float32)
+
+    obs_buf[:, 0] = o
+    ag_buf[:,  0] = ag
+
+    for t in range(T):
+        with torch.no_grad():
+            o_t = torch.as_tensor(norm_o.normalize(o), dtype=torch.float32)
+            g_t = torch.as_tensor(norm_g.normalize(g), dtype=torch.float32)
+            actions = actor.get_action(o_t, g_t)          # (n_envs, ACT_DIM)
+
+        noise   = noise_eps * np.random.randn(*actions.shape)
+        actions = np.clip(actions + noise, -MAX_U, MAX_U)
+        rand_mask = np.random.uniform(size=n_envs) < random_eps
+        if rand_mask.any():
+            actions[rand_mask] = np.random.uniform(
+                -MAX_U, MAX_U, size=actions.shape)[rand_mask]
+
+        obs_dict, _, _, _, _ = vec_env.step(actions)
+        o  = obs_dict['observation']
+        ag = obs_dict['achieved_goal']
+
+        obs_buf[:, t + 1] = o
+        ag_buf[:,  t + 1] = ag
+        g_buf[:,   t    ] = g
+        u_buf[:,   t    ] = actions
+
+    return [
+        {'o': obs_buf[i], 'ag': ag_buf[i], 'g': g_buf[i], 'u': u_buf[i]}
+        for i in range(n_envs)
+    ]
+
+
 def evaluate(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
              T: int, n_episodes: int = 10) -> float:
     """Run n_episodes deterministically and return success rate."""
@@ -417,7 +485,7 @@ def train(
     n_epochs: int = 200,
     n_cycles: int = 50,
     n_batches: int = 40,
-    rollout_batch: int = 2,
+    n_envs: int = 4,
     T: int = 50,
     batch_size: int = 256,
     buffer_size: int = 1_000_000,
@@ -441,7 +509,7 @@ def train(
             project=wandb_project,
             config=dict(
                 env_name=env_name, n_epochs=n_epochs, n_cycles=n_cycles,
-                n_batches=n_batches, rollout_batch=rollout_batch, T=T,
+                n_batches=n_batches, n_envs=n_envs, T=T,
                 batch_size=batch_size, buffer_size=buffer_size, replay_k=replay_k,
                 hidden=hidden, gamma=gamma, polyak=polyak, lr=lr,
                 mi_r_scale=mi_r_scale, action_l2=action_l2, clip_return=clip_return,
@@ -449,7 +517,7 @@ def train(
             ),
         )
 
-    env      = gym.make(env_name)
+    vec_env  = SyncVectorEnv([lambda: gym.make(env_name)] * n_envs)
     eval_env = gym.make(env_name)
 
     norm_o = Normalizer(OBS_DIM)
@@ -479,9 +547,10 @@ def train(
 
         for cycle in range(n_cycles):
             # 1. Collect rollouts
-            for _ in range(rollout_batch):
-                ep = collect_episode(env, actor, norm_o, norm_g, T,
-                                     noise_eps, random_eps)
+            episodes = collect_episodes_vec(
+                vec_env, actor, norm_o, norm_g, T, n_envs,
+                noise_eps, random_eps)
+            for ep in episodes:
                 buffer.store_episode(ep)
                 norm_o.update(ep['o'].reshape(-1, OBS_DIM))
                 norm_g.update(ep['g'].reshape(-1, GOAL_DIM))
@@ -548,7 +617,7 @@ def train(
                 'train/elapsed_s':   elapsed,
             }, step=global_step)
 
-    env.close(); eval_env.close()
+    vec_env.close(); eval_env.close()
     if wandb_project:
         wandb.finish()
 
@@ -556,11 +625,14 @@ def train(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env',          default='FetchPickAndPlace-v4')
-    parser.add_argument('--epochs',       type=int, default=200)
-    parser.add_argument('--seed',         type=int, default=0)
+    parser.add_argument('--env',           default='FetchPickAndPlace-v4')
+    parser.add_argument('--epochs',        type=int, default=200)
+    parser.add_argument('--n-envs',        type=int, default=4,
+                        help='Number of parallel envs for rollout collection')
+    parser.add_argument('--seed',          type=int, default=0)
     parser.add_argument('--wandb-project', default=None,
                         help='W&B project name (omit to disable logging)')
     args = parser.parse_args()
-    train(env_name=args.env, n_epochs=args.epochs, seed=args.seed,
+    train(env_name=args.env, n_epochs=args.epochs, n_envs=args.n_envs,
+          seed=args.seed,
           wandb_project=args.wandb_project)

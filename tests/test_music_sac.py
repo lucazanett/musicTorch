@@ -280,3 +280,25 @@ def test_update_actor_and_alpha():
     update_alpha(log_alpha, opt_alpha, actor, norm_o, norm_g, o, g,
                  target_entropy=-ACT_DIM)
     assert log_alpha.item() != alpha_before
+
+
+def test_collect_episodes_vec_shapes():
+    """collect_episodes_vec returns n_envs episode dicts with correct shapes."""
+    import gymnasium as gym
+    from gymnasium.vector import SyncVectorEnv
+
+    n_envs, T = 3, 5
+    vec_env = SyncVectorEnv([lambda: gym.make('FetchPickAndPlace-v4')] * n_envs)
+    actor   = Actor(OBS_DIM, GOAL_DIM, ACT_DIM)
+    norm_o  = Normalizer(OBS_DIM)
+    norm_g  = Normalizer(GOAL_DIM)
+
+    episodes = collect_episodes_vec(vec_env, actor, norm_o, norm_g, T, n_envs)
+    vec_env.close()
+
+    assert len(episodes) == n_envs
+    for ep in episodes:
+        assert ep['o'].shape  == (T + 1, OBS_DIM)
+        assert ep['ag'].shape == (T + 1, GOAL_DIM)
+        assert ep['g'].shape  == (T,     GOAL_DIM)
+        assert ep['u'].shape  == (T,     ACT_DIM)
