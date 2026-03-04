@@ -404,6 +404,7 @@ def evaluate(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
                 a = actor.get_action(o_t, g_t).flatten()
             obs_dict, _, terminated, truncated, info = env.step(a)
             o = obs_dict['observation']
+            g = obs_dict['desired_goal']
             if terminated or truncated:
                 break
         successes += float(info.get('is_success', 0.0))
