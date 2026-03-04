@@ -356,11 +356,12 @@ def collect_episode(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
     obs_seq.append(o.copy()); ag_seq.append(ag.copy())
 
     for _ in range(T):
-        o_t = torch.as_tensor(
-            norm_o.normalize(o[None]), dtype=torch.float32)
-        g_t = torch.as_tensor(
-            norm_g.normalize(g[None]), dtype=torch.float32)
-        action = actor.get_action(o_t, g_t).flatten()
+        with torch.no_grad():
+            o_t = torch.as_tensor(
+                norm_o.normalize(o[None]), dtype=torch.float32)
+            g_t = torch.as_tensor(
+                norm_g.normalize(g[None]), dtype=torch.float32)
+            action = actor.get_action(o_t, g_t).flatten()
 
         # Epsilon-random exploration
         noise  = noise_eps * np.random.randn(*action.shape)
@@ -371,11 +372,9 @@ def collect_episode(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
         obs_dict, _, _, _, _ = env.step(action)
         o   = obs_dict['observation']
         ag  = obs_dict['achieved_goal']
-        g_  = obs_dict['desired_goal']   # goal stays fixed per episode
 
         obs_seq.append(o.copy()); ag_seq.append(ag.copy())
         g_seq.append(g.copy()); u_seq.append(action.copy())
-        g = g_
 
     return {
         'o':  np.array(obs_seq,  np.float32),   # (T+1, obs_dim)
