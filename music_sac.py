@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import gymnasium as gym
+import time
 
 # ── Constants ──────────────────────────────────────────────────────────
 LOG_STD_MIN = -5
@@ -382,3 +384,139 @@ def collect_episode(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
         'g':  np.array(g_seq,    np.float32),   # (T, goal_dim)
         'u':  np.array(u_seq,    np.float32),
     }
+
+
+def evaluate(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
+             T: int, n_episodes: int = 10) -> float:
+    """Run n_episodes deterministically and return success rate."""
+    successes = 0
+    for _ in range(n_episodes):
+        obs_dict, _ = env.reset()
+        o = obs_dict['observation']
+        g = obs_dict['desired_goal']
+        for _ in range(T):
+            with torch.no_grad():
+                o_t = torch.as_tensor(
+                    norm_o.normalize(o[None]), dtype=torch.float32)
+                g_t = torch.as_tensor(
+                    norm_g.normalize(g[None]), dtype=torch.float32)
+                a = actor.get_action(o_t, g_t).flatten()
+            obs_dict, _, terminated, truncated, info = env.step(a)
+            o = obs_dict['observation']
+            if terminated or truncated:
+                break
+        successes += float(info.get('is_success', 0.0))
+    return successes / n_episodes
+
+
+def train(
+    env_name: str = 'FetchPickAndPlace-v3',
+    n_epochs: int = 200,
+    n_cycles: int = 50,
+    n_batches: int = 40,
+    rollout_batch: int = 2,
+    T: int = 50,
+    batch_size: int = 256,
+    buffer_size: int = 1_000_000,
+    replay_k: int = 4,
+    hidden: int = 256,
+    gamma: float = 0.98,
+    polyak: float = 0.95,
+    lr: float = 0.001,
+    mi_r_scale: float = 5000.0,
+    action_l2: float = 1.0,
+    clip_return: float = 50.0,
+    noise_eps: float = 0.2,
+    random_eps: float = 0.3,
+    seed: int = 0,
+):
+    np.random.seed(seed); torch.manual_seed(seed)
+
+    env      = gym.make(env_name)
+    eval_env = gym.make(env_name)
+
+    norm_o = Normalizer(OBS_DIM)
+    norm_g = Normalizer(GOAL_DIM)
+
+    actor  = Actor( OBS_DIM, GOAL_DIM, ACT_DIM, hidden)
+    critic = TwinQ( OBS_DIM, GOAL_DIM, ACT_DIM, hidden)
+    target = TwinQ( OBS_DIM, GOAL_DIM, ACT_DIM, hidden)
+    mine   = MINENet()
+    target.load_state_dict(critic.state_dict())
+    for p in target.parameters():
+        p.requires_grad_(False)
+
+    log_alpha = torch.tensor(0.0, requires_grad=True)
+    target_entropy = -float(ACT_DIM)
+
+    opt_actor  = torch.optim.Adam(actor.parameters(),  lr=lr)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=lr)
+    opt_mine   = torch.optim.Adam(mine.parameters(),   lr=lr)
+    opt_alpha  = torch.optim.Adam([log_alpha],         lr=lr)
+
+    buffer = EpisodeBuffer(OBS_DIM, GOAL_DIM, ACT_DIM, T, buffer_size, replay_k)
+
+    for epoch in range(n_epochs):
+        t_start = time.time()
+
+        for cycle in range(n_cycles):
+            # 1. Collect rollouts
+            for _ in range(rollout_batch):
+                ep = collect_episode(env, actor, norm_o, norm_g, T,
+                                     noise_eps, random_eps)
+                buffer.store_episode(ep)
+                norm_o.update(ep['o'].reshape(-1, OBS_DIM))
+                norm_g.update(ep['g'].reshape(-1, GOAL_DIM))
+            norm_o.recompute_stats()
+            norm_g.recompute_stats()
+
+            if buffer.size < 1:
+                continue
+
+            # 2. Train MINE
+            mine.train()
+            for _ in range(n_batches):
+                o_tau_np = buffer.sample_mi_pairs(batch_size)
+                o_tau    = torch.as_tensor(o_tau_np, dtype=torch.float32)
+                loss_mine = mine(o_tau).mean()
+                opt_mine.zero_grad(); loss_mine.backward(); opt_mine.step()
+
+            # 3. Train SAC
+            for _ in range(n_batches):
+                batch = buffer.sample(batch_size, compute_reward_np)
+                r_i   = compute_mi_reward(mine, batch['o'], batch['o_2'],
+                                          mi_r_scale)
+
+                def t(x): return torch.as_tensor(x, dtype=torch.float32)
+                o_t  = t(batch['o']);  o2_t = t(batch['o_2'])
+                g_t  = t(batch['g']);  a_t  = t(batch['u'])
+                ri_t = t(r_i)
+
+                update_critic(critic, target, actor, opt_critic,
+                              norm_o, norm_g, o_t, o2_t, g_t, a_t,
+                              ri_t, log_alpha, gamma, clip_return)
+                update_actor( actor, critic, opt_actor,
+                              norm_o, norm_g, o_t, g_t, log_alpha, action_l2)
+                update_alpha( log_alpha, opt_alpha, actor,
+                              norm_o, norm_g, o_t, g_t, target_entropy)
+                soft_update(target, critic, tau=1.0 - polyak)
+
+        # 4. Evaluate
+        success_rate = evaluate(eval_env, actor, norm_o, norm_g, T, n_episodes=10)
+        elapsed = time.time() - t_start
+        print(f"Epoch {epoch+1:3d}/{n_epochs}  "
+              f"success={success_rate:.3f}  "
+              f"alpha={log_alpha.exp().item():.4f}  "
+              f"t={elapsed:.1f}s")
+
+    env.close(); eval_env.close()
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env',    default='FetchPickAndPlace-v3')
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--seed',   type=int, default=0)
+    args = parser.parse_args()
+    train(env_name=args.env, n_epochs=args.epochs, seed=args.seed)
