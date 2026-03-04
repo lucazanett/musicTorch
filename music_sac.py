@@ -326,3 +326,60 @@ def update_alpha(
     loss = -(log_alpha * (log_prob + target_entropy)).mean()
     opt.zero_grad(); loss.backward(); opt.step()
     return loss.item()
+
+
+def compute_reward_np(achieved_goal: np.ndarray, desired_goal: np.ndarray,
+                      threshold: float = 0.05) -> np.ndarray:
+    """Sparse reward: 0 for success, -1 otherwise.
+    Reference: gymnasium_robotics FetchPickAndPlace reward function.
+    """
+    d = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
+    return (d < threshold).astype(np.float32) - 1.0
+
+
+def collect_episode(env, actor: Actor, norm_o: Normalizer, norm_g: Normalizer,
+                    T: int, noise_eps: float = 0.2,
+                    random_eps: float = 0.3) -> dict:
+    """Run one episode and return it as a dict of arrays.
+    Returns:
+        o:  (T+1, obs_dim) observations
+        ag: (T+1, goal_dim) achieved goals
+        g:  (T, goal_dim)   desired goals
+        u:  (T, act_dim)    actions
+    Reference: baselines/her/rollout.py:RolloutWorker
+    """
+    obs_seq, ag_seq, g_seq, u_seq = [], [], [], []
+    obs_dict, _ = env.reset()
+    o   = obs_dict['observation']
+    ag  = obs_dict['achieved_goal']
+    g   = obs_dict['desired_goal']
+    obs_seq.append(o.copy()); ag_seq.append(ag.copy())
+
+    for _ in range(T):
+        o_t = torch.as_tensor(
+            norm_o.normalize(o[None]), dtype=torch.float32)
+        g_t = torch.as_tensor(
+            norm_g.normalize(g[None]), dtype=torch.float32)
+        action = actor.get_action(o_t, g_t).flatten()
+
+        # Epsilon-random exploration
+        noise  = noise_eps * np.random.randn(*action.shape)
+        action = np.clip(action + noise, -MAX_U, MAX_U)
+        if np.random.uniform() < random_eps:
+            action = np.random.uniform(-MAX_U, MAX_U, size=action.shape)
+
+        obs_dict, _, _, _, _ = env.step(action)
+        o   = obs_dict['observation']
+        ag  = obs_dict['achieved_goal']
+        g_  = obs_dict['desired_goal']   # goal stays fixed per episode
+
+        obs_seq.append(o.copy()); ag_seq.append(ag.copy())
+        g_seq.append(g.copy()); u_seq.append(action.copy())
+        g = g_
+
+    return {
+        'o':  np.array(obs_seq,  np.float32),   # (T+1, obs_dim)
+        'ag': np.array(ag_seq,   np.float32),
+        'g':  np.array(g_seq,    np.float32),   # (T, goal_dim)
+        'u':  np.array(u_seq,    np.float32),
+    }
